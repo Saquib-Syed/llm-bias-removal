@@ -5,40 +5,54 @@ from tqdm.auto import tqdm
 def ave_logit_diff(
     model, 
     toks, 
-    pos, 
     toks_a, 
-    toks_b
+    toks_b,
+    do_mean=True
 ):
     logits = model(toks)
-    logits = logits[range(logits.shape[0]), pos, :]
+    logits = logits[:, -1, :]
 
-    return (logits[:, toks_a] - logits[:, toks_b]).mean()
+    if do_mean:
+        return (logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1)).mean()
+    return list(logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1))
 
 def batched_ave_logit_diff(
     model, 
     toks, 
-    pos, 
     toks_a, 
     toks_b, 
-    batch_size
+    batch_size,
+    do_mean=True
 ):
-    logit_diff = 0
+    logit_diff = []
     for i in tqdm(range(0, len(toks), batch_size)):
-        logit_diff += ave_logit_diff(
-            model, 
-            toks[i:i+batch_size], 
-            pos[i:i+batch_size],
-            toks_a, 
-            toks_b
-        )
+        toks_slice = toks[i:i+batch_size]
+        if do_mean:
+            logit_diff.append(ave_logit_diff(
+                model, 
+                toks_slice, 
+                toks_a, 
+                toks_b,
+                do_mean
+            ))
+        else:
+            logit_diff.extend(ave_logit_diff(
+                model, 
+                toks_slice, 
+                toks_a, 
+                toks_b,
+                do_mean
+            ))
 
-    return logit_diff / (len(toks) // batch_size)
+    if do_mean:
+        return torch.tensor(logit_diff).mean()
+    else:
+        return torch.tensor(logit_diff)
 
 def logit_diff_on_gender(
     df, 
     model, 
     toks, 
-    pos,
     toks_a, 
     toks_b, 
     gender="male", 
@@ -47,5 +61,5 @@ def logit_diff_on_gender(
     gender_idx = torch.tensor(df.index[df['stereotypical_gender'] == gender])
 
     if batch_size is None:
-        return ave_logit_diff(model, toks[gender_idx], pos[gender_idx], toks_a, toks_b)
-    return batched_ave_logit_diff(model, toks[gender_idx], pos[gender_idx], toks_a, toks_b, batch_size)
+        return ave_logit_diff(model, toks[gender_idx], toks_a, toks_b)
+    return batched_ave_logit_diff(model, toks[gender_idx], toks_a, toks_b, batch_size)

@@ -47,19 +47,24 @@ def get_tok_pos(toks, occ_toks, tokenizer):
 
     tok_pos = defaultdict(list) # tok_pos: [start, end]
 
-    _, he_tok, she_tok, his_tok, her_tok = tokenizer.encode(" he she his her")
+    _, he_tok, she_tok, him_tok, his_tok, her_tok = tokenizer.encode(" he she him his her")
 
     for occ_tok, sentence_tok in zip(occ_toks, toks):
         # Finding occupation in the sentence
         occ_pos, occ_len = find_sub_list(occ_tok, sentence_tok)
         tok_pos["{occupation}"].append((occ_pos, occ_len))
 
-        for pronoun_tok in [he_tok, she_tok, his_tok, her_tok]:
+        found = False
+        for pronoun_tok in [he_tok, she_tok, him_tok, his_tok, her_tok]:
             # Finding pronoun in the sentence
             pronoun_pos, pronoun_len = find_sub_list(pronoun_tok, sentence_tok)
             if pronoun_pos is not None:
                 tok_pos["{pronoun}"].append((pronoun_pos, pronoun_len)) 
+                found = True
                 break
+        if not found:
+            print(
+                f"Pronoun not found in sentence\n{[f'{t}:{tokenizer.decode(t)}' for t in sentence_tok]}")
 
     return tok_pos
 
