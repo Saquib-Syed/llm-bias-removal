@@ -1,6 +1,6 @@
 {
     "instruction_templates": [
-        "The {occupation} went to {place} because"
+        "The {occupation} said that"
     ],
     "male_sub_map": {
         "{occupation}": [

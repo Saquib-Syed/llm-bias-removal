@@ -14,7 +14,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 #%%
 model = HookedTransformer.from_pretrained(
-    "google/gemma-2b",
+    "gpt2-small",
     default_padding_side="left"
 )
 tokenizer = model.tokenizer
@@ -42,7 +42,7 @@ dataset = PairedInstructionDataset(
     tokenizer=tokenizer,
     tokenize_instructions=tokenize_instructions
 )
-_, he_tok, she_tok, him_tok, his_tok, her_tok = tokenizer.encode(" he she him his her")
+he_tok, she_tok, him_tok, his_tok, her_tok = tokenizer.encode(" he she him his her")
 # %%
 from evals.evals import logit_diff_on_gender
 
@@ -63,7 +63,7 @@ with torch.set_grad_enabled(False):
             batch_size=500,
             do_mean=False
         )
-
+    print(male.mean(), female.mean())
 #%%
 with open('results/prompted_2.json', 'w') as f:
     json.dump({'male_jobs': male.tolist(), 'female_jobs': female.tolist()}, f)

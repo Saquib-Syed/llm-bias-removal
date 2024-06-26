@@ -16,6 +16,11 @@ def ave_logit_diff(
         return (logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1)).mean()
     return list(logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1))
 
+def logit_diff_from_logits(logits, toks_a, toks_b, do_mean=True):
+    if do_mean:
+        return (logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1)).mean()
+    return list(logits[:, toks_a].mean(dim=-1) - logits[:, toks_b].mean(dim=-1))
+
 def batched_ave_logit_diff(
     model, 
     toks, 
