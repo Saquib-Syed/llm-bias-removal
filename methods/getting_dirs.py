@@ -3,9 +3,15 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from evals.evals import batched_ave_logit_diff
 from dataset.load_dataset import load_data, get_toks, get_tok_pos
+from dataset.custom_dataset import PairedInstructionDataset
 
+import json
 import torch
 from transformer_lens import HookedTransformer
+import functools
+
+import transformer_lens.patching as patching
+from evals.evals import logit_diff_from_logits
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -19,11 +25,12 @@ model.eval()
 model.to(device)
 
 #%%
-from dataset.custom_dataset import PairedInstructionDataset
-import json
 
 with open(f'dataset/gender_bias_ds.json', 'r') as f:
-    data = json.load(f)
+    train_data = json.load(f)
+
+with open(f'dataset/gender_bias_ds_test.json', 'r') as f:
+    test_data = json.load(f)
 
 def tokenize_instructions(tokenizer, instructions):
     try:
@@ -31,23 +38,49 @@ def tokenize_instructions(tokenizer, instructions):
     except:
         print(instructions)
 
-dataset = PairedInstructionDataset(
-    N=1500,
-    instruction_templates=data['instruction_templates'],
-    harmful_substitution_map=data['male_sub_map'],
-    harmless_substitution_map=data['female_sub_map'],
+paired_dataset = PairedInstructionDataset(
+    N=60,
     tokenizer=tokenizer,
-    tokenize_instructions=tokenize_instructions
+    tokenize_instructions=tokenize_instructions,
+    instruction_templates=train_data['instruction_templates'],
+    harmful_substitution_map=train_data['male_sub_map'],
+    harmless_substitution_map=train_data['female_sub_map'],
 )
 
+train_male_toks = tokenize_instructions(
+    tokenizer,
+    [
+        train_data['instruction_templates'][0].format(occupation=inst)
+        for inst in train_data['male_sub_map']["{occupation}"]
+    ]
+)
+train_female_toks = tokenize_instructions(
+    tokenizer,
+    [
+        train_data['instruction_templates'][0].format(occupation=inst)
+        for inst in train_data['female_sub_map']['{occupation}']
+    ]
+)
+test_male_toks = tokenize_instructions(
+    tokenizer,
+    [
+        test_data['instruction_templates'][0].format(occupation=inst)
+        for inst in test_data['male_sub_map']['{occupation}']
+    ]
+)
+test_female_toks = tokenize_instructions(
+    tokenizer,
+    [
+        test_data['instruction_templates'][0].format(occupation=inst)
+        for inst in test_data['female_sub_map']['{occupation}']
+    ]
+)
 he_tok, she_tok, him_tok, his_tok, her_tok = tokenizer.encode(" he she him his her")
 #%% Sanity Check
-
-N = 500
 with torch.set_grad_enabled(False):
     male_logit_diff = batched_ave_logit_diff(
             model,
-            dataset.harmful_dataset.toks[:N],
+            train_male_toks,
             toks_a=torch.tensor([he_tok]),
             toks_b=torch.tensor([she_tok]),
             batch_size=500,
@@ -55,7 +88,7 @@ with torch.set_grad_enabled(False):
         )
     female_logit_diff = batched_ave_logit_diff(
             model,
-            dataset.harmless_dataset.toks[:N],
+            train_female_toks,
             toks_a=torch.tensor([he_tok]),
             toks_b=torch.tensor([she_tok]),
             batch_size=500,
@@ -75,7 +108,7 @@ from transformer_lens import utils
 
 logit_diff_dir = einops.repeat(
     model.tokens_to_residual_directions(he_tok) - model.tokens_to_residual_directions(she_tok),
-    "d_model -> batch d_model", batch=N
+    "d_model -> batch d_model", batch=train_male_toks.shape[0]
 )
 def residual_stack_to_logit_diff(
     residual_stack: Float[Tensor, "... batch d_model"], 
@@ -95,14 +128,17 @@ def residual_stack_to_logit_diff(
 
     return average_logit_diff
 
-_, male_cache = model.run_with_cache(dataset.harmful_dataset.toks[:N])
+_, paired_male_cache = model.run_with_cache(paired_dataset.harmful_dataset.toks)
+_, paired_female_cache = model.run_with_cache(paired_dataset.harmless_dataset.toks)
+
+_, male_cache = model.run_with_cache(train_male_toks)
 male_final_residual_stream: Float[Tensor, "batch seq d_model"] = male_cache["resid_post", -1]
 male_final_token_residual_stream = male_final_residual_stream[:, -1, :]
 male_scaled_final_token_residual_stream = male_cache.apply_ln_to_stack(male_final_token_residual_stream, layer=-1, pos_slice=-1)
 male_accumulated_residual, _ = male_cache.accumulated_resid(layer=-1, incl_mid=True, pos_slice=-1, return_labels=True)
 male_per_layer_residual, labels = male_cache.decompose_resid(layer=-1, pos_slice=-1, return_labels=True)
 
-_, female_cache = model.run_with_cache(dataset.harmless_dataset.toks[:N])
+_, female_cache = model.run_with_cache(train_female_toks)
 female_final_residual_stream: Float[Tensor, "batch seq d_model"] = female_cache["resid_post", -1]
 female_final_token_residual_stream = female_final_residual_stream[:, -1, :]
 female_scaled_final_token_residual_stream = female_cache.apply_ln_to_stack(female_final_token_residual_stream, layer=-1, pos_slice=-1)
@@ -150,7 +186,16 @@ fig = go.Figure(
         xaxis_title="Layer",
         yaxis_title="Logit Diff (Male - Female)",
         hovermode="x unified",
+        title_x=0.5,
+        xaxis_tickangle=-45,
+        font=dict(size=12)
     )
+)
+fig.update_layout(
+    yaxis=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    xaxis=dict(title=dict(font=dict(size=20))),
+    legend=dict(title=dict(font=dict(size=30))),
+    title=dict(font=dict(size=25))
 )
 fig.show()
 # Save as pdf
@@ -176,14 +221,22 @@ fig = go.Figure(
         xaxis_title="Layer",
         yaxis_title="Logit Diff (Male - Female)",
         hovermode="x unified",
+        title_x=0.5,
+        xaxis_tickangle=-45,
+        font=dict(size=12)
     )
+)
+# update y axis labels, tick labels, legend, and title to have bigger font
+fig.update_layout(
+    yaxis=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    xaxis=dict(title=dict(font=dict(size=20))),
+    legend=dict(title=dict(font=dict(size=30))),
+    title=dict(font=dict(size=25))
 )
 fig.show()
 # Save as pdf
 fig.write_image("results/per_layer_logit_diffs.pdf")
 #%%
-import transformer_lens.patching as patching
-from evals.evals import logit_diff_from_logits
 
 # male_logit_diff = male_logit_diff.mean().item()
 # female_logit_diff = female_logit_diff.mean().item()
@@ -194,20 +247,71 @@ def gender_metric(logits):
 
 act_patch_attn_head_out_all_pos = patching.get_act_patch_attn_head_out_all_pos(
     model, 
-    dataset.harmless_dataset.toks[:N], 
-    male_cache, 
+    paired_dataset.harmless_dataset.toks, 
+    paired_male_cache, 
     gender_metric 
 )
 #%%
-imshow(
-    act_patch_attn_head_out_all_pos, 
+import plotly.express as px
+fig = px.imshow(
+    utils.to_numpy(act_patch_attn_head_out_all_pos), 
+    color_continuous_scale="RdBu",
+    color_continuous_midpoint=0,
     labels={"y": "Layer", "x": "Head"}, 
-    title="attn_head_out Activation Patching (All Pos)",
+    title="Activation Patching Across All Heads",
     width=600,
-    margin=dict(l=10, r=20, t=50, b=20)
+    zmin=-0.5,
+    zmax=0.5
+)
+fig.update_layout(
+    xaxis=dict(title=dict(font=dict(size=25)), tickfont=dict(size=15)),
+    yaxis=dict(title=dict(font=dict(size=25)), tickfont=dict(size=15)),
+    title=dict(font=dict(size=25)),
+    coloraxis_colorbar=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    title_x=0.5,
+)
+fig.update_yaxes(dtick=1)
+fig.update_xaxes(dtick=1)
+fig.show()
+fig.write_image("results/head_act_patch.pdf")
+#%%
+top_heads = [(10, 9), (9, 7), (4, 3), (11, 8), (9, 2), (6, 0), (8, 11)]
+# Patch all the top heads
+def top_head_patch_hook(act, hook, cache):
+    layer = hook.layer()
+    heads_to_patch = [head for (layer_, head) in top_heads if layer_ == layer]
+    if len(heads_to_patch) > 0:
+        heads_to_patch = torch.tensor(heads_to_patch)
+        act[:, :, heads_to_patch, :] = cache[f'blocks.{layer}.attn.hook_z'][:, :, heads_to_patch, :]
+    return act
+
+hook_fn = functools.partial(top_head_patch_hook, cache=paired_male_cache)
+top_head_patch_logits = model.run_with_hooks(
+    paired_dataset.harmless_dataset.toks,
+    fwd_hooks=[(f'blocks.{layer}.attn.hook_z', hook_fn) for layer, _ in top_heads]
+)
+print(gender_metric(top_head_patch_logits))
+#%%
+top_head_attn_pattern = torch.stack([
+    paired_male_cache[f'blocks.{layer}.attn.hook_pattern'][:, head, -1, :].mean(dim=0)
+    for layer, head in top_heads
+])
+pttn_labels = ['(0) The', '(1) {OCCUPATION}', '(2) {OCCUPATION}', '(3) said', '(4) that']
+
+imshow(
+    top_head_attn_pattern, 
+    labels={"x": "Position", "y": "Head"},
+    x=pttn_labels,
+    y=[f"L{layer}H{head}" for layer, head in top_heads],
+    title="Top Heads Attention Pattern",
+    width=700,
+    zmin=0,
+    zmax=1,
+    color_continuous_scale='Blues',
 )
 
 #%% PCA of activations of the most important components
+from sklearn.decomposition import PCA
 l10h9_acts = torch.cat(
     [
         male_cache["blocks.10.attn.hook_z"][:, -1, 9, :],
@@ -216,39 +320,113 @@ l10h9_acts = torch.cat(
     dim=0
 )
 
-# Perform PCA on the acts, which are shape (batch, d_head)
-from sklearn.decomposition import PCA
 pca = PCA(n_components=3)
 pca_acts = pca.fit_transform(utils.to_numpy(l10h9_acts))
-
+male_cache_len = male_cache['blocks.0.attn.hook_z'].shape[0]
 # Plot the PCA
 fig = go.Figure(
     data=[
         go.Scatter(
-            x=pca_acts[:N, 0],
-            y=pca_acts[:N, 1],
+            x=pca_acts[:male_cache_len, 0],
+            y=pca_acts[:male_cache_len, 1],
             mode="markers",
             name="Male Activations"
         ),
         go.Scatter(
-            x=pca_acts[N:, 0],
-            y=pca_acts[N:, 1],
+            x=pca_acts[male_cache_len:, 0],
+            y=pca_acts[male_cache_len:, 1],
             mode="markers",
             name="Female Activations"
         ),
     ],
     layout=go.Layout(
-        title="PCA of Activations of the Most Important Components",
+        title="PCA of Activations for Layer 10 Head 9",
         xaxis_title="PCA 1",
         yaxis_title="PCA 2",
         hovermode="closest",
+        xaxis_range=[-1.5, 1.5],
+        yaxis_range=[-1.5, 1.5],
+        title_x=0.5,
+        legend=dict(font=dict(size=20)),
     )
 )
+fig.update_layout(
+    yaxis=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    xaxis=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    title=dict(font=dict(size=25)),
+)
 fig.show()
-#%% Act diffs
+fig.write_image("results/pca_l10h9.pdf")
+# Perform PCA on the acts, which are shape (batch, d_head)
+pca_components = []
+for (layer, head) in top_heads:
+    stacked_head_act = torch.cat([
+        male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :], 
+        female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+    ], dim=0).cpu()
+    pca = PCA(n_components=1)
+    pca_acts = pca.fit_transform(utils.to_numpy(stacked_head_act))
+    pca_components.append(pca.components_[0])
 
+
+#%% Activation patching on residual stream
+resid_pre_act_patch_results = patching.get_act_patch_resid_pre(
+    model,
+    paired_dataset.harmless_dataset.toks, 
+    paired_male_cache, 
+    gender_metric 
+)
+labels = [f"{tok} {i}" for i, tok in enumerate(model.to_str_tokens(paired_dataset.harmless_dataset.toks[0]))]
+
+#%%
+fig = px.imshow(
+    utils.to_numpy(resid_pre_act_patch_results), 
+    color_continuous_scale="Blues",
+    labels={"x": "Position", "y": "Layer"},
+    x=pttn_labels,
+    title="Activation Patching on the Residual Stream",
+    width=600,
+    height=500
+)
+fig.update_layout(
+    xaxis=dict(title=dict(font=dict(size=25)), tickfont=dict(size=15)),
+    yaxis=dict(title=dict(font=dict(size=25)), tickfont=dict(size=15)),
+    title=dict(font=dict(size=25)),
+    coloraxis_colorbar=dict(title=dict(font=dict(size=20)), tickfont=dict(size=20)),
+    title_x=0.5,
+)
+fig.update_yaxes(dtick=1)
+fig.show()
+fig.write_image("results/resid_pre_act_patch.pdf")
+#%% Act diffs
+# male - female directions
+act_diffs = torch.stack([
+    male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :] - female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+    for layer, head in top_heads
+]).mean(dim=1)
 #%% Probing
+from sklearn.linear_model import LogisticRegression
+# We train 7 probes on the stacked activations of each head
+probe_dirs = []
+
+for (layer, head) in top_heads:
+    male_batch_len = male_cache[f'blocks.{layer}.attn.hook_z'].shape[0]
+    female_batch_len = female_cache[f'blocks.{layer}.attn.hook_z'].shape[0]
+
+    stacked_head_act = torch.cat([
+        male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :], 
+        female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+    ], dim=0).cpu()
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(stacked_head_act, torch.tensor([0] * male_batch_len + [1] * female_batch_len))
+    probe_dirs.append(clf.coef_)
 
 #%% Ablations
 
 #%% Orthogonalization
+
+# We can take:
+# Act diffs of important heads
+# PCA of important heads
+# Probing dirs of important heads
+# And ablate and orthogonalize them. Then we test the effect and capabilities of the model.

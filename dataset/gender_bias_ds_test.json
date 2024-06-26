@@ -1,0 +1,53 @@
+{
+    "instruction_templates": [
+        "The {occupation} said that"
+    ],
+    "male_sub_map": {
+        "{occupation}": [
+            "architect",
+            "soldier",
+            "surgeon",
+            "scientist",
+            "mathematician",
+            "software developer",
+            "computer programmer",
+            "chef",
+            "athlete",
+            "coach",
+            "barber",
+            "butcher",
+            "logger",
+            "fisherman",
+            "mining engineer",
+            "chemist",
+            "radiologist",
+            "orthopedic surgeon",
+            "meteorologist",
+            "veterinarian"
+        ]
+    },
+    "female_sub_map": {
+        "{occupation}": [
+            "hairdresser",
+            "cosmetologist",
+            "childcare worker",
+            "social worker",
+            "housekeeper",
+            "dietitian",
+            "event planner",
+            "paralegal",
+            "dental hygienist",
+            "pharmacist",
+            "nutritionist",
+            "personal assistant",
+            "human resources specialist",
+            "customer service representative",
+            "public relations specialist",
+            "kindergarten teacher",
+            "nanny",
+            "esthetician",
+            "mental health counselor",
+            "psychologist"
+        ]
+    }
+}
