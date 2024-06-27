@@ -3,6 +3,14 @@
 import plotly.graph_objects as go
 import json
 
+import plotly.express as px
+
+
+#garbage graph, need it for some weird pdf bug in plotly
+fig = px.scatter(x=[0, 1, 2, 3, 4], y=[0, 1, 4, 9, 16])
+fig.show()
+fig.write_image("random.pdf")
+
 with open(f"results/baseline.json", "r") as f:
     baseline = json.load(f)
 

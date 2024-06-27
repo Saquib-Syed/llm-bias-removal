@@ -12,8 +12,14 @@ import functools
 
 import transformer_lens.patching as patching
 from evals.evals import logit_diff_from_logits
+import plotly.express as px
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+#garbage graph, need it for some weird pdf bug in plotly
+fig = px.scatter(x=[0, 1, 2, 3, 4], y=[0, 1, 4, 9, 16])
+fig.show()
+fig.write_image("random.pdf")
 
 #%%
 model = HookedTransformer.from_pretrained(
