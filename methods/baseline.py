@@ -24,9 +24,8 @@ model.to(device)
 #%%
 from dataset.custom_dataset import PairedInstructionDataset
 import json
-
 with open(f'dataset/gender_bias_ds.json', 'r') as f:
-    data = json.load(f)
+    train_data = json.load(f)
 
 def tokenize_instructions(tokenizer, instructions):
     try:
@@ -34,13 +33,13 @@ def tokenize_instructions(tokenizer, instructions):
     except:
         print(instructions)
 
-dataset = PairedInstructionDataset(
-    N=1500,
-    instruction_templates=data['instruction_templates'],
-    harmful_substitution_map=data['male_sub_map'],
-    harmless_substitution_map=data['female_sub_map'],
+paired_dataset = PairedInstructionDataset(
+    N=60,
     tokenizer=tokenizer,
-    tokenize_instructions=tokenize_instructions
+    tokenize_instructions=tokenize_instructions,
+    instruction_templates=train_data['instruction_templates'],
+    harmful_substitution_map=train_data['male_sub_map'],
+    harmless_substitution_map=train_data['female_sub_map'],
 )
 he_tok, she_tok, him_tok, his_tok, her_tok = tokenizer.encode(" he she him his her")
 # %%
@@ -49,7 +48,7 @@ from evals.evals import logit_diff_on_gender
 with torch.set_grad_enabled(False):
     male = batched_ave_logit_diff(
             model,
-            dataset.harmful_dataset.toks,
+            paired_dataset.harmful_dataset.toks,
             toks_a=torch.tensor([he_tok]),
             toks_b=torch.tensor([she_tok]),
             batch_size=500,
@@ -57,7 +56,7 @@ with torch.set_grad_enabled(False):
         )
     female = batched_ave_logit_diff(
             model,
-            dataset.harmless_dataset.toks,
+            paired_dataset.harmless_dataset.toks,
             toks_a=torch.tensor([he_tok]),
             toks_b=torch.tensor([she_tok]),
             batch_size=500,
@@ -65,6 +64,6 @@ with torch.set_grad_enabled(False):
         )
     print(male.mean(), female.mean())
 #%%
-with open('results/prompted_2.json', 'w') as f:
+with open('results/baseline.json', 'w') as f:
     json.dump({'male_jobs': male.tolist(), 'female_jobs': female.tolist()}, f)
 # %%

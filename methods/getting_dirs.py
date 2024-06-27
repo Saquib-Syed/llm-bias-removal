@@ -20,6 +20,7 @@ model = HookedTransformer.from_pretrained(
     "gpt2-small",
     default_padding_side="left"
 )
+model.set_use_attn_result(True)
 tokenizer = model.tokenizer
 model.eval()
 model.to(device)
@@ -314,15 +315,15 @@ print(gender_metric(top_head_patch_logits))
 from sklearn.decomposition import PCA
 l10h9_acts = torch.cat(
     [
-        male_cache["blocks.10.attn.hook_z"][:, -1, 9, :],
-        female_cache["blocks.10.attn.hook_z"][:, -1, 9, :]
+        male_cache["blocks.10.attn.hook_result"][:, -1, 9, :],
+        female_cache["blocks.10.attn.hook_result"][:, -1, 9, :]
     ],
     dim=0
 )
 
-pca = PCA(n_components=3)
+pca = PCA(n_components=2)
 pca_acts = pca.fit_transform(utils.to_numpy(l10h9_acts))
-male_cache_len = male_cache['blocks.0.attn.hook_z'].shape[0]
+male_cache_len = male_cache['blocks.0.attn.hook_result'].shape[0]
 # Plot the PCA
 fig = go.Figure(
     data=[
@@ -344,8 +345,8 @@ fig = go.Figure(
         xaxis_title="PCA 1",
         yaxis_title="PCA 2",
         hovermode="closest",
-        xaxis_range=[-1.5, 1.5],
-        yaxis_range=[-1.5, 1.5],
+        # xaxis_range=[-1.5, 1.5],
+        # yaxis_range=[-1.5, 1.5],
         title_x=0.5,
         legend=dict(font=dict(size=20)),
     )
@@ -361,8 +362,8 @@ fig.write_image("results/pca_l10h9.pdf")
 pca_components = {}
 for (layer, head) in top_heads:
     stacked_head_act = torch.cat([
-        male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :], 
-        female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+        male_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :], 
+        female_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :]
     ], dim=0).cpu()
     pca = PCA(n_components=1)
     pca_acts = pca.fit_transform(utils.to_numpy(stacked_head_act))
@@ -403,7 +404,7 @@ fig.write_image("results/resid_pre_act_patch.pdf")
 #%% Act diffs
 # male - female directions
 act_diffs = {
-    (layer, head): male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :] - female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+    (layer, head): male_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :] - female_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :]
     for layer, head in top_heads
 }
 #%% Probing
@@ -412,19 +413,19 @@ from sklearn.linear_model import LogisticRegression
 probe_dirs = {}
 
 for (layer, head) in top_heads:
-    male_batch_len = male_cache[f'blocks.{layer}.attn.hook_z'].shape[0]
-    female_batch_len = female_cache[f'blocks.{layer}.attn.hook_z'].shape[0]
+    male_batch_len = male_cache[f'blocks.{layer}.attn.hook_result'].shape[0]
+    female_batch_len = female_cache[f'blocks.{layer}.attn.hook_result'].shape[0]
 
     stacked_head_act = torch.cat([
-        male_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :], 
-        female_cache[f'blocks.{layer}.attn.hook_z'][:, -1, head, :]
+        male_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :], 
+        female_cache[f'blocks.{layer}.attn.hook_result'][:, -1, head, :]
     ], dim=0).cpu()
     clf = LogisticRegression(max_iter=1000)
     clf.fit(stacked_head_act, torch.tensor([0] * male_batch_len + [1] * female_batch_len))
     probe_dirs[(layer, head)] = clf.coef_
 
 #%% Ablations
-
+import numpy as np
 # We take all these directions and ablate them from the heads
 # Then, we measure the logit diff across a bunch of examples
 
@@ -455,8 +456,13 @@ def ablating_female_metric(logits):
 def ablate_dir_hook(act, hook, dirs, reverse_dir=False):
     layer = hook.layer()
     for (layer_, head), d in dirs.items():
-        d = d.mean(dim=0)
-        d /= d.norm()
+        try:
+            d = d.mean(dim=0)
+            d /= d.norm()
+        except:
+            d = torch.tensor(d, dtype=torch.float32).to(device)
+            d = d.mean(dim=0)
+            d /= d.norm()
         if reverse_dir:
             d = -d
         if layer_ == layer:
@@ -468,10 +474,10 @@ act_diff_logits = model.run_with_hooks(
     test_male_toks,
     fwd_hooks=[
         (
-            f'blocks.{layer}.attn.hook_z', 
+            f'blocks.{layer}.attn.hook_result', 
             functools.partial(
                 ablate_dir_hook, 
-                dirs=act_diffs,
+                dirs=probe_dirs,
                 reverse_dir=False
             )
         )
@@ -480,4 +486,98 @@ act_diff_logits = model.run_with_hooks(
 )
 print(logit_diff_from_logits(act_diff_logits[:, -1, :], toks_a=[he_tok], toks_b=[she_tok]))
 
+# %% Plan B: mean ablate the important heads
+import numpy as np
+rand_heads = [
+    (5, 4), (6, 9), (7, 6), (8, 3), (9, 5), (10, 10), (11, 1)
+]
+def head_ablation_hook(act, hook, male_cache, female_cache, mult=1):
+    layer = hook.layer()
+    heads_to_ablate = [head for (layer_, head) in rand_heads if layer_ == layer]
+    if len(heads_to_ablate) > 0:
+        heads_to_ablate = torch.tensor(heads_to_ablate)
+        mean_act = torch.cat([
+            male_cache[f'blocks.{layer}.attn.hook_z'],
+            mult * female_cache[f'blocks.{layer}.attn.hook_z'],
+        ], dim=0).mean(0).unsqueeze(0)
+        act[:, -1, heads_to_ablate, :] = mean_act[:, -1, heads_to_ablate, :]
+    return act
+
+
+for mult in np.linspace(-20, 5, 11):
+    hook_fn = functools.partial(
+        head_ablation_hook,
+        male_cache=paired_male_cache,
+        female_cache=paired_female_cache,
+        mult=mult
+    )
+
+    ablate_logits = model.run_with_hooks(
+        test_female_toks,
+        fwd_hooks=[
+            (
+                f'blocks.{layer}.attn.hook_z', 
+                hook_fn
+            )
+            for layer, _ in top_heads
+        ]
+    )
+    print(mult, logit_diff_from_logits(ablate_logits[:, -1, :], toks_a=[he_tok], toks_b=[she_tok]))
+
+#%%
+female_mult=1.6
+hook_fn = functools.partial(
+    head_ablation_hook,
+    male_cache=paired_male_cache,
+    female_cache=paired_female_cache,
+    mult=female_mult
+)
+
+ablate_logits = model.run_with_hooks(
+    test_female_toks,
+    fwd_hooks=[
+        (
+            f'blocks.{layer}.attn.hook_z', 
+            hook_fn
+        )
+        for layer, _ in top_heads
+    ]
+)
+female_ablate_logit_diff = logit_diff_from_logits(
+    ablate_logits[:, -1, :], 
+    toks_a=[he_tok], 
+    toks_b=[she_tok],
+    do_mean=False
+)
+female_ablate_logit_diff = [l.item() for l in female_ablate_logit_diff]
+
+male_mult=2.4
+hook_fn = functools.partial(
+    head_ablation_hook,
+    male_cache=paired_male_cache,
+    female_cache=paired_female_cache,
+    mult=male_mult
+)
+
+ablate_logits = model.run_with_hooks(
+    test_male_toks,
+    fwd_hooks=[
+        (
+            f'blocks.{layer}.attn.hook_z', 
+            hook_fn
+        )
+        for layer, _ in top_heads
+    ]
+)
+male_ablate_logit_diff = logit_diff_from_logits(
+    ablate_logits[:, -1, :], 
+    toks_a=[he_tok], 
+    toks_b=[she_tok],
+    do_mean=False
+)
+male_ablate_logit_diff = [l.item() for l in male_ablate_logit_diff]
+with open('results/rand_ablate.json', 'w') as f:
+    json.dump(
+        {'male_jobs': male_ablate_logit_diff, 
+         'female_jobs': female_ablate_logit_diff}, f)
 # %%
